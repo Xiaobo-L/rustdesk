@@ -1,0 +1,127 @@
+# RustDesk iOS 云端编译（未签名 IPA） —— A 方案
+#
+# 用法：
+#   1. 把这个文件放到你 fork 的仓库的 .github/workflows/ 目录下
+#      （文件名随意，例如 build-ios-unsigned.yml）
+#   2. 仓库顶部 Actions 标签 → 左侧找到本 workflow → Run workflow
+#   3. 跑完后在页面底部 Artifacts 下载 rustdesk-unsigned-ios.ipa
+#   4. 用 AltStore（无需 Xcode）签名装进手机
+#
+# 说明：
+#   - 本机完全不用装 Flutter / Rust / vcpkg / Xcode，全部在 GitHub 的 Mac runner 上跑。
+#   - 产物是 --no-codesign 的完全未签名 IPA，签名交给 AltStore。
+#   - 桥接文件（flutter_rust_bridge）不入库，本 workflow 在编译前内联生成，避免跨 job 传产物出错。
+#   - 首次运行约 30–60 分钟，主要卡在 vcpkg 从源码编译 ffmpeg / libvpx 等 C 库。
+#   - 我（AI）无法在沙箱里替你验证此文件；若红字报错，把日志贴给我，我帮你改。
+
+name: build-ios-unsigned
+
+on:
+  workflow_dispatch:
+    inputs:
+      upload-artifact:
+        description: "Run full build and upload IPA"
+        type: boolean
+        default: true
+
+env:
+  FLUTTER_VERSION: "3.24.5"          # iOS 实际构建用的 Flutter
+  BRIDGE_FLUTTER_VERSION: "3.22.3"   # 桥接文件生成必须用这个版本（与官方一致）
+  RUST_VERSION: "1.75"
+  FLUTTER_RUST_BRIDGE_VERSION: "1.80.1"
+  CARGO_EXPAND_VERSION: "1.0.95"
+  VCPKG_COMMIT_ID: "9e593bb18ea69cc5095e012465dcd675a822ed0d"
+
+jobs:
+  build-ios:
+    if: ${{ inputs.upload-artifact }}
+    name: build rustdesk ios ipa (unsigned)
+    runs-on: macos-latest
+    steps:
+      - name: Install build deps (nasm/yasm/cmake/llvm)
+        run: brew install nasm yasm cmake llvm
+
+      - name: Checkout source code (recursive submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain (stable 1.75 + iOS target)
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: aarch64-apple-ios
+          components: rustfmt
+
+      - name: Install nightly (cargo-expand 需要，桥接生成用)
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: nightly
+          components: rustfmt
+
+      - name: Setup vcpkg (pinned commit)
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+          doNotCache: false
+
+      - name: Install vcpkg deps (arm64-ios triplet)
+        run: |
+          $VCPKG_ROOT/vcpkg install --triplet arm64-ios --x-install-root="$VCPKG_ROOT/installed"
+
+      # ---- 生成 flutter_rust_bridge 桥接文件（必须用 Flutter 3.22.3） ----
+      - name: Install Flutter 3.22.3 (for bridge)
+        uses: subosito/flutter-action@v2
+        with:
+          channel: "stable"
+          flutter-version: ${{ env.BRIDGE_FLUTTER_VERSION }}
+          cache: true
+
+      - name: Install flutter_rust_bridge codegen tools
+        run: |
+          cargo install cargo-expand --version ${{ env.CARGO_EXPAND_VERSION }} --locked || true
+          cargo install flutter_rust_bridge_codegen --version ${{ env.FLUTTER_RUST_BRIDGE_VERSION }} --features "uuid" --locked
+
+      - name: Generate bridge files
+        env:
+          LLVM_CONFIG: /opt/homebrew/opt/llvm/bin/llvm-config
+          LIBCLANG_PATH: /opt/homebrew/opt/llvm/lib
+        run: |
+          # extended_text 14 在 3.22.3 的 Dart 上解析不过，按官方做法降级到 13
+          sed -i '' -e 's/extended_text: 14.0.0/extended_text: 13.0.0/g' flutter/pubspec.yaml
+          pushd flutter && flutter pub get && popd
+          ~/.cargo/bin/flutter_rust_bridge_codegen \
+            --rust-input ./src/flutter_ffi.rs \
+            --dart-output ./flutter/lib/generated_bridge.dart \
+            --c-output ./flutter/macos/Runner/bridge_generated.h
+          cp ./flutter/macos/Runner/bridge_generated.h ./flutter/ios/Runner/bridge_generated.h
+
+      # ---- 用 Flutter 3.24.5 正式构建 ----
+      - name: Install Flutter 3.24.5 (for build)
+        uses: subosito/flutter-action@v2
+        with:
+          channel: "stable"
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - name: Patch Flutter 3.24.5
+        run: |
+          cd "$(dirname "$(dirname "$(which flutter)")")"
+          git apply "${{ github.workspace }}/.github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff"
+
+      - name: Build rustdesk lib (aarch64-apple-ios)
+        run: |
+          rustup target add aarch64-apple-ios
+          cargo build --locked --features flutter,hwcodec --release --target aarch64-apple-ios --lib
+
+      - name: Build rustdesk ipa (no codesign)
+        run: |
+          pushd flutter
+          flutter build ipa --release --no-codesign
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustdesk-unsigned-ios.ipa
+          path: flutter/build/ios/ipa/*.ipa
+          if-no-files-found: error

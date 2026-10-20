@@ -150,9 +150,9 @@ jobs:
           # Runner.app 打成 IPA, 供 AltStore 用你的 Apple ID 在本地重新签名后安装。
           cd build/ios
           rm -rf ipa && mkdir -p ipa/Payload
-          APP=
-          if [ -z "" ]; then echo '未找到 Runner.app, archive 结构异常:'; find archive -maxdepth 6 -name '*.app'; exit 1; fi
-          cp -R "" ipa/Payload/
+          APP=$(find archive -name 'Runner.app' -maxdepth 5 | head -1)
+          if [ -z "$APP" ]; then echo '未找到 Runner.app, archive 结构异常:'; find archive -maxdepth 6 -name '*.app'; exit 1; fi
+          cp -R "$APP" ipa/Payload/
           (cd ipa && zip -r -q RustDesk.ipa Payload)
           ls -la ipa/RustDesk.ipa
 

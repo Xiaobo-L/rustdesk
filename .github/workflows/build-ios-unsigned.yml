@@ -12,6 +12,11 @@
 #   - 产物是 --no-codesign 的完全未签名 IPA，签名交给 AltStore。
 #   - 桥接文件（flutter_rust_bridge）不入库，本 workflow 在编译前内联生成，避免跨 job 传产物出错。
 #   - 首次运行约 30–60 分钟，主要卡在 vcpkg 从源码编译 ffmpeg / libvpx 等 C 库。
+#   - 重要：本 workflow 把 runner 钉在 macos-14、Python 钉在 3.13。
+#     原因：RustDesk 的 vcpkg 基线 9e593bb 是 2024 年写的，当时对应的 GitHub runner 是
+#     macos-14（Xcode 15/16、iOS 17/18 SDK、Python 3.12/3.13）。新版 macos-latest 已变成
+#     macos-26（Python 3.15），会触发 vcpkg 宿主工具 pkgconf（meson 1.9.0）在 Python 3.15
+#     下 meson setup 失败。钉版本可避免这种"镜像漂移"导致的红叉。
 #   - 我（AI）无法在沙箱里替你验证此文件；若红字报错，把日志贴给我，我帮你改。
 
 name: build-ios-unsigned
@@ -31,12 +36,14 @@ env:
   FLUTTER_RUST_BRIDGE_VERSION: "1.80.1"
   CARGO_EXPAND_VERSION: "1.0.95"
   VCPKG_COMMIT_ID: "9e593bb18ea69cc5095e012465dcd675a822ed0d"
-  IPHONEOS_DEPLOYMENT_TARGET: "13.0"
+
 jobs:
   build-ios:
     if: ${{ inputs.upload-artifact }}
     name: build rustdesk ios ipa (unsigned)
-    runs-on: macos-latest
+    # 钉 macos-14：对齐 vcpkg 基线 9e593bb 的编写环境，避免 macos-latest(macos-26/Python3.15)
+    # 触发 vcpkg 宿主工具(pkgconf/meson)在 Python 3.15 下构建失败。
+    runs-on: macos-14
     steps:
       - name: Install build deps (nasm/yasm/cmake/llvm)
         run: brew install nasm yasm cmake llvm
@@ -59,11 +66,17 @@ jobs:
           toolchain: nightly
           components: rustfmt
 
+      - name: Pin Python to 3.13 (avoid vcpkg meson breakage on 3.14/3.15)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
       - name: Setup vcpkg (pinned commit)
         uses: lukka/run-vcpkg@v11
         with:
           vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
-          doNotCache: false
+          # 关闭缓存，保证每次都在修正后的环境里干净重编，避免失败残留进缓存。
+          doNotCache: true
 
       - name: Install vcpkg deps (arm64-ios triplet)
         run: |
@@ -110,6 +123,14 @@ jobs:
           git apply "${{ github.workspace }}/.github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff"
 
       - name: Build rustdesk lib (aarch64-apple-ios)
+        env:
+          # 关键修复：Rust 的 aarch64-apple-ios 默认最低目标是 iOS 10.0，
+          # 但 vcpkg 在 runner 上用新 Xcode/iOS 26.x SDK 编出的 C 库（aom/ffmpeg 等）
+          # 引用了 ___chkstk_darwin，该符号只在 iOS 13+ 的 libSystem 提供。
+          # 链接目标停在 10.0 会报 "Undefined symbols: ___chkstk_darwin"。
+          # 抬到 13.0（与 RustDesk Podfile / Xcode 工程一致）即可解析。
+          # 若日后出现其它 "Undefined symbols" 且指向更新系统符号，可继续上调此值。
+          IPHONEOS_DEPLOYMENT_TARGET: "13.0"
         run: |
           rustup target add aarch64-apple-ios
           cargo build --locked --features flutter,hwcodec --release --target aarch64-apple-ios --lib

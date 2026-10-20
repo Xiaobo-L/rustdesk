@@ -137,6 +137,12 @@ jobs:
 
       - name: Build rustdesk ipa (no codesign)
         run: |
+          # 桥接步(Flutter 3.22.3)曾把 extended_text 降到 13.0.0 以通过 pub get；
+          # 此处构建用 Flutter 3.24.5，必须还原回 14.0.0(官方版本, 要求 flutter>=3.24.0,
+          # 且其 layoutInlineChildren 签名与 3.24.5 框架一致)。不还原会报
+          # "TextOverflowMixin.layoutInlineChildren has fewer positional arguments"。
+          sed -i '' -e 's/extended_text: 13.0.0/extended_text: 14.0.0/g' flutter/pubspec.yaml
+          rm -f flutter/pubspec.lock
           pushd flutter
           flutter build ipa --release --no-codesign
 

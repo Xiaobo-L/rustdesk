@@ -145,6 +145,16 @@ jobs:
           rm -f flutter/pubspec.lock
           pushd flutter
           flutter build ipa --release --no-codesign
+          # Flutter 3.24.5 在 --no-codesign 模式下只产出 Runner.xcarchive，不会再自动导出 IPA
+          # (官方 flutter-build.yml 同命令, 但其 IPA 上传步骤是注释掉的)。这里手动把未签名的
+          # Runner.app 打成 IPA, 供 AltStore 用你的 Apple ID 在本地重新签名后安装。
+          cd build/ios
+          rm -rf ipa && mkdir -p ipa/Payload
+          APP=
+          if [ -z "" ]; then echo '未找到 Runner.app, archive 结构异常:'; find archive -maxdepth 6 -name '*.app'; exit 1; fi
+          cp -R "" ipa/Payload/
+          (cd ipa && zip -r -q RustDesk.ipa Payload)
+          ls -la ipa/RustDesk.ipa
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4

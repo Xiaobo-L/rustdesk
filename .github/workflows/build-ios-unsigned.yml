@@ -76,7 +76,7 @@ jobs:
         with:
           vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
           # 关闭缓存，保证每次都在修正后的环境里干净重编，避免失败残留进缓存。
-          doNotCache: true
+          doNotCache: false
 
       - name: Install vcpkg deps (arm64-ios triplet)
         run: |
